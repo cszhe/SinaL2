@@ -6,15 +6,10 @@
 """
 # 以下是自动生成的 #
 # --- 导入系统配置
-try:
-    import dHydra.core.util as util
-except ImportError:
-    from . import util
+from . import util
 from .Vendor import Vendor
 # --- 导入自定义配置
 from .connection import *
-from .const import *
-from .config import *
 # 以上是自动生成的 #
 
 import requests
@@ -34,21 +29,27 @@ import os
 
 class Sina(Vendor):
 
-    def __init__(self, username=None, pwd=None, **kwargs):
+    def __init__(self, username=None, pwd=None, login=False, **kwargs):
         super().__init__(**kwargs)
         config = util.read_config(os.getcwd() + "/sina.json")
-        if (username is None):
+        if username is None:
             if "username" in config.keys():
                 self.username = config["username"]
             else:
-                self.username = input('请输入新浪登录帐号：')
+                if login:
+                    self.username = input('请输入新浪登录帐号：')
+                else:
+                    self.username = None
         else:
             self.username = username
-        if (pwd is None):
+        if pwd is None:
             if "password" in config.keys():
                 self.pwd = config["password"]
             else:
-                self.pwd = getpass.getpass("输入登录密码（密码不会显示在屏幕上，输入后按回车确定）:")
+                if login:
+                    self.pwd = getpass.getpass("输入登录密码（密码不会显示在屏幕上，输入后按回车确定）:")
+                else:
+                    self.username = None
         else:
             self.pwd = pwd
         self.rsa_pubkey = '10001'
@@ -370,7 +371,7 @@ class Sina(Vendor):
             todayAll = DataFrame(todayAll)
         return todayAll
 
-    def get_symbols(self, stockTypeList=["hs_a", "hs_b"]):
+    def get_symbols(self, stockTypeList=["hs_a", "hs_b"], dataframe=True):
         """
         用于获取当日股票列表
         返回： list
@@ -381,8 +382,13 @@ class Sina(Vendor):
         """
         symbolList = list()
         for node in stockTypeList:
-            symbols = list(self.get_today_all(node=node)["symbol"])
-            symbolList.extend(symbols)
+            if dataframe:
+                symbols = list(self.get_today_all(node=node)["symbol"])
+                symbolList.extend(symbols)
+            else:
+                today_all = self.get_today_all(node=node)
+                for i in today_all:
+                    symbolList.append(i["symbol"])
         return symbolList
 
     def get_quote(self, symbols, dataframe=True):

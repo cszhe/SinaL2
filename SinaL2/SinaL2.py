@@ -1,33 +1,21 @@
 # -*- coding: utf-8 -*-
-try:
-    from dHydra.core.Functions import *
-except ImportError:
-    pass
-try:
-	from . import util
-except ImportError:
-    import dHydra.core.util as util
-try:
-    from SinaL2.Sina.Sina import Sina
-except ImportError:
-    pass
+from . import util
+from .Sina.Sina import Sina
+
 from datetime import datetime
 from .connection import *
 import time
-import requests
 import websockets
-import getpass
-import base64
-import rsa
-import binascii
 import json
 import asyncio
 import threading
-import functools
 import re
-import gc
-import os
+import traceback
 
+
+class NotLoginError(Exception):
+    def __init__(self):
+        super().__init__()
 
 class SinaL2:
 
@@ -37,8 +25,7 @@ class SinaL2:
         pwd=None,
         symbols=None,
         hq='hq_pjb',
-        query=['quotation', 'transaction'],
-        # ['quotation', 'orders', 'transaction', 'info']
+        query=['quotation', 'transaction', "orders"],
         on_recv_data=None,   # 收到数据以后的回调函数
         use_logger=True,
         **kwargs
@@ -52,13 +39,10 @@ class SinaL2:
         if use_logger:
             self.logger = util.get_logger(self.__class__.__name__)
 
-        # 如果是dHydra框架内调用，则直接用框架内的Sina类，
-        # 否则作为独立的类在外部调用
-        try:
-            self.sina = get_vendor('Sina')
-        except Exception as e:
-            self.sina = Sina()
-        self.is_login = self.login()
+        self.sina = Sina(login=True)
+        self.is_login = False
+        self.stopped = False
+        self.terminated = False
 
         if symbols is None:
             self.symbols = self.sina.get_symbols()
@@ -93,7 +77,6 @@ class SinaL2:
     # 2cn_是3秒一条的Level2 10档行情
     # 2cn_symbol_0,2cn_symbol_1是逐笔数据
     # 2cn_symbol_orders是挂单数据
-    # symbol_i是基本信息
     def generate_qlist(self, qlist, symbol):
         if 'quotation' in self.query:
             if qlist != '':
@@ -126,7 +109,8 @@ class SinaL2:
                     retry = False
                 else:
                     self.logger.warning("{},{}".format(response, qlist))
-                    if response["msg_code"] == -11:
+                    if response["msg_code"] == -1 or \
+                                    response["msg_code"] == -11:
                         time.sleep(2)
                         self.logger.warning("尝试重新登录新浪")
                         self.sina.login(verify=False)
@@ -161,7 +145,7 @@ class SinaL2:
                     )
                 )
 
-        while True:
+        while not self.stopped:
             try:
                 message = yield from ws.recv()
                 if self.on_recv_data is None:
@@ -170,6 +154,7 @@ class SinaL2:
                     self.on_recv_data(message)
 
             except Exception as e:
+                traceback.print_exc()
                 self.logger.error(
                     "{},{}"
                     .format(
@@ -178,7 +163,8 @@ class SinaL2:
                     )
                 )
                 ws.close()
-                yield from self.create_ws(qlist=qlist, symbol_list=symbol_list)
+                if not self.stopped:
+                    yield from self.create_ws(qlist=qlist, symbol_list=symbol_list)
 
     @asyncio.coroutine
     def renew_token(self, symbol):
@@ -209,8 +195,10 @@ class SinaL2:
         weight = (len(self.query) +
                   1) if ('transaction' in self.query) else len(self.query)
         step = int(64 / weight)
-        symbol_list_slice = [symbol_list[i: i + step]
-                             for i in range(0, len(symbol_list), step)]
+        symbol_list_slice = [
+            symbol_list[i: i + step]
+            for i in range(0, len(symbol_list), step)
+        ]
 
         tasks = list()
         for symbol_list in symbol_list_slice:
@@ -225,7 +213,7 @@ class SinaL2:
 
     # 用于定时发送空字符串
     def token_sender(self):
-        while True:
+        while not self.stopped:
             self.logger.info("开启话唠模式每55秒的定时与服务器聊天")
             start = datetime.now()
             tasks = list()
@@ -249,7 +237,7 @@ class SinaL2:
 
     # 持续检查一次更新token
     def token_renewer(self):
-        while True:
+        while not self.stopped:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             tasks = list()
@@ -266,9 +254,24 @@ class SinaL2:
                 loop.close()
             time.sleep(1)
 
+    def stop(self):
+        """
+        调用stop()以后实际上并不会立刻停止，
+        一般会由ws断开（会在60秒内发生）以后退出循环，
+        伴随start()中三个线程的全部结束而停止
+        :return:
+        """
+        self.stopped = True
+
     def start(self):
         """
         """
+        self.is_login = self.login()
+
+        if not self.is_login:
+            raise NotLoginError
+        self.stopped = False
+        self.terminated = False
         # 开启token manager
         tokenRenewer = threading.Thread(target=self.token_renewer)
         tokenSender = threading.Thread(target=self.token_sender)
@@ -282,3 +285,6 @@ class SinaL2:
         tokenRenewer.join()
         tokenSender.join()
         websocketCreator.join()
+
+        self.terminated = True
+        self.logger.info("SinaL2结束")
